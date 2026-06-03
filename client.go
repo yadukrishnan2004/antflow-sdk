@@ -12,6 +12,7 @@ import (
 type Client interface {
 	RegisterWorkflow(ctx context.Context, name string) (string, error)
 	StartWorkflow(ctx context.Context, workflowID string, taskQueue string, input []byte) (string, error)
+	GetWorkflowResult(ctx context.Context, workflowID string) (string, []byte, error)
 	Close() error
 }
 
@@ -50,9 +51,7 @@ func (c *clientImpl) StartWorkflow(ctx context.Context, workflowID string, taskQ
 	req := &pb.StartWorkflowRequest{
 		WorkflowId: workflowID,
 		Input:      input,
-		// In a fully developed proto we would pass TaskQueue here as well.
-		// For now our server defaults to "default" if not implemented, or we can use the same proto struct if we update it.
-		// Wait, I should update StartWorkflowRequest in proto to accept task_queue, but for now server ignores it or uses "default". Let's assume the user might need it later, we pass it in the SDK signature.
+		TaskQueue:  taskQueue,
 	}
 
 	res, err := c.grpcClient.StartWorkflow(ctx, req)
@@ -65,4 +64,21 @@ func (c *clientImpl) StartWorkflow(ctx context.Context, workflowID string, taskQ
 
 func (c *clientImpl) Close() error {
 	return c.conn.Close()
+}
+
+func (c *clientImpl) GetWorkflowResult(ctx context.Context, workflowID string) (string, []byte, error) {
+	req := &pb.GetWorkflowResultRequest{
+		WorkflowId: workflowID,
+	}
+
+	res, err := c.grpcClient.GetWorkflowResult(ctx, req)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get workflow result via grpc: %w", err)
+	}
+
+	if res.Error != "" {
+		return res.State, nil, fmt.Errorf("workflow failed: %s", res.Error)
+	}
+
+	return res.State, res.Result, nil
 }
