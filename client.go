@@ -16,7 +16,7 @@ type Client interface {
 }
 
 type clientImpl struct {
-	conn      *grpc.ClientConn
+	conn       *grpc.ClientConn
 	grpcClient pb.WorkflowServiceClient
 }
 
