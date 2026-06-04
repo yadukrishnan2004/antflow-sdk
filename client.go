@@ -61,7 +61,7 @@ func (c *clientImpl) StartWorkflow(ctx context.Context, workflowName string, tas
 		return "", fmt.Errorf("failed to start workflow via grpc: %w", err)
 	}
 
-	return res.Id, nil
+	return res.WorkflowId, nil
 }
 
 func (c *clientImpl) Close() error {
