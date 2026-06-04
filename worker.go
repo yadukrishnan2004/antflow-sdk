@@ -51,6 +51,17 @@ func (w *workerImpl) Start(ctx context.Context) error {
 
 	log.Printf("Worker [%s] connected to %s, listening on queue '%s'", w.workerID, w.target, w.taskQueue)
 
+	// Auto-register workflows with the server
+	registeredNames := w.registry.GetRegisteredNames()
+	for _, name := range registeredNames {
+		_, err := grpcClient.RegisterWorkflow(ctx, &pb.RegisterWorkflowRequest{Name: name})
+		if err != nil {
+			log.Printf("Worker [%s] failed to register workflow '%s': %v", w.workerID, name, err)
+		} else {
+			log.Printf("Worker [%s] successfully registered workflow '%s' with server", w.workerID, name)
+		}
+	}
+
 	// Open the stream
 	stream, err := grpcClient.StreamTasks(ctx, &pb.StreamTasksRequest{
 		WorkerId:  w.workerID,

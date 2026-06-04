@@ -15,6 +15,7 @@ type WorkflowBuilder interface {
 type Registry interface {
 	RegisterWorkflow(name string) WorkflowBuilder
 	GetWorkflow(name string) (WorkflowFunc, error)
+	GetRegisteredNames() []string
 }
 
 type workflowStep struct {
@@ -48,6 +49,16 @@ func (r *registryImpl) RegisterWorkflow(name string) WorkflowBuilder {
 	builder := &workflowBuilderImpl{}
 	r.workflows[name] = builder
 	return builder
+}
+
+func (r *registryImpl) GetRegisteredNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for name := range r.workflows {
+		names = append(names, name)
+	}
+	return names
 }
 
 func (r *registryImpl) GetWorkflow(name string) (WorkflowFunc, error) {
