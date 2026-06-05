@@ -10,7 +10,16 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// Worker executes workflows from an AntFlow task queue.
+//
+// A worker connects to the AntFlow server, advertises the workflows available in
+// its Registry, listens for tasks on a task queue, and reports completed results
+// back to the server.
 type Worker interface {
+	// Start connects the worker to AntFlow and begins processing tasks.
+	//
+	// Start blocks until the context is cancelled or the worker encounters a
+	// stream error.
 	Start(ctx context.Context) error
 }
 
@@ -21,13 +30,43 @@ type workerImpl struct {
 	workerID  string
 }
 
+// WorkerOptions configures a worker process.
 type WorkerOptions struct {
-	Target    string
+	// Target is the AntFlow server gRPC address, such as "localhost:50051".
+	Target string
+
+	// TaskQueue is the queue this worker will poll for workflow tasks.
+	//
+	// StartWorkflow must use the same task queue for this worker to receive the
+	// execution.
 	TaskQueue string
-	Registry  Registry
-	WorkerID  string
+
+	// Registry contains the workflows this worker can execute.
+	//
+	// Register workflows with NewRegistry before passing the registry to NewWorker.
+	Registry Registry
+
+	// WorkerID is an optional stable identifier for logs and server coordination.
+	//
+	// If empty, NewWorker uses "default-worker".
+	WorkerID string
 }
 
+// NewWorker creates a worker for the provided task queue and registry.
+//
+// Example:
+//
+//	registry := sdk.NewRegistry()
+//	registry.RegisterWorkflow("add").AddStep("add", addWorkflow)
+//
+//	worker := sdk.NewWorker(sdk.WorkerOptions{
+//		Target:    "localhost:50051",
+//		TaskQueue: "calc-queue",
+//		Registry:  registry,
+//		WorkerID:  "calc-worker-1",
+//	})
+//
+//	err := worker.Start(ctx)
 func NewWorker(opts WorkerOptions) Worker {
 	if opts.WorkerID == "" {
 		opts.WorkerID = "default-worker"

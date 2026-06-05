@@ -9,12 +9,40 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// Client is the command interface for controlling workflows through AntFlow.
+//
+// Use a client when your application needs to register workflows with the
+// server, start executions, wait for results, inspect state, or cancel a running
+// workflow.
 type Client interface {
+	// RegisterWorkflow registers a workflow name with the AntFlow server.
+	//
+	// Workers usually auto-register workflows on startup, but applications can
+	// call this directly when they need explicit registration.
 	RegisterWorkflow(ctx context.Context, name string) (string, error)
+
+	// StartWorkflow starts a workflow execution on the given task queue.
+	//
+	// workflowName must match a registered workflow. input is passed to the first
+	// workflow step and may contain any encoded payload, such as JSON bytes.
 	StartWorkflow(ctx context.Context, workflowName string, taskQueue string, input []byte) (string, error)
+
+	// GetWorkflowResult returns the current state and result for a workflow execution.
+	//
+	// If the workflow failed, the returned error includes the workflow failure
+	// message from the server.
 	GetWorkflowResult(ctx context.Context, workflowExecutionID string) (string, []byte, error)
+
+	// CancelWorkflow requests cancellation for a running workflow execution.
 	CancelWorkflow(ctx context.Context, workflowExecutionID string) error
+
+	// WaitForResult blocks until the workflow completes, fails, is cancelled, or
+	// the context is cancelled.
+	//
+	// On success it returns the final workflow result bytes.
 	WaitForResult(ctx context.Context, workflowExecutionID string) ([]byte, error)
+
+	// Close releases the underlying gRPC connection.
 	Close() error
 }
 
@@ -23,6 +51,9 @@ type clientImpl struct {
 	grpcClient pb.WorkflowServiceClient
 }
 
+// NewClient connects to an AntFlow server.
+//
+// target should be a gRPC address such as "localhost:50051".
 func NewClient(target string) (Client, error) {
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
