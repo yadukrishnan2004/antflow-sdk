@@ -49,6 +49,7 @@ type Client interface {
 type clientImpl struct {
 	conn       *grpc.ClientConn
 	grpcClient pb.WorkflowServiceClient
+
 }
 
 // NewClient connects to an AntFlow server.

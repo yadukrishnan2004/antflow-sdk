@@ -91,13 +91,19 @@ func (w *workerImpl) Start(ctx context.Context) error {
 	log.Printf("Worker [%s] connected to %s, listening on queue '%s'", w.workerID, w.target, w.taskQueue)
 
 	// Auto-register workflows with the server
-	registeredNames := w.registry.GetRegisteredNames()
-	for _, name := range registeredNames {
-		_, err := grpcClient.RegisterWorkflow(ctx, &pb.RegisterWorkflowRequest{Name: name})
+	for workflowName, def := range w.registry.GetRegisteredWorkflows() {
+		_ = def // satisfy compiler if def is unused
+		stepNames, _ := w.registry.GetStepNames(workflowName)
+		wfType, _ := w.registry.GetWorkflowType(workflowName)
+		_, err := grpcClient.RegisterWorkflow(ctx, &pb.RegisterWorkflowRequest{
+			Name:         workflowName,
+			WorkflowType: string(wfType),
+			Steps:        stepNames,
+		})
 		if err != nil {
-			log.Printf("Worker [%s] failed to register workflow '%s': %v", w.workerID, name, err)
+			log.Printf("Worker [%s] failed to register workflow '%s': %v", w.workerID, workflowName, err)
 		} else {
-			log.Printf("Worker [%s] successfully registered workflow '%s' with server", w.workerID, name)
+			log.Printf("Worker [%s] successfully registered workflow '%s' with server", w.workerID, workflowName)
 		}
 	}
 
@@ -128,37 +134,36 @@ func (w *workerImpl) Start(ctx context.Context) error {
 	}
 }
 
-func (w *workerImpl) processTask(ctx context.Context, client pb.WorkflowServiceClient, taskResp *pb.StreamTaskResponse) {
-	log.Printf("Worker [%s] picked up task %s for workflow %s", w.workerID, taskResp.TaskId, taskResp.WorkflowId)
+func (w *workerImpl)  processTask(ctx context.Context, client pb.WorkflowServiceClient, taskResp *pb.StreamTaskResponse) {
+	log.Printf("Worker [%s] picked up task %s — workflow=%s step=%s index=%d", 
+	w.workerID, taskResp.TaskId, taskResp.WorkflowId, taskResp.StepName, taskResp.StepIndex)
 
 	var result []byte
 	var errString string
 
-	wfFunc, err := w.registry.GetWorkflow(taskResp.Name)
+	stepFn, err := w.registry.GetStep(taskResp.Name,taskResp.StepName)
 	if err != nil {
-		errString = err.Error()
-		log.Printf("Task %s failed: %v", taskResp.TaskId, err)
-	} else {
-		// Execute the workflow logic
-		res, execErr := wfFunc(ctx, taskResp.Input)
-		if execErr != nil {
-			errString = execErr.Error()
-			log.Printf("Task %s failed during execution: %v", taskResp.TaskId, execErr)
-		} else {
+        errString = err.Error()
+        log.Printf("Task %s failed to find step: %v", taskResp.TaskId, err)
+    }else{
+        res, execErr := stepFn(ctx, taskResp.Input)
+		 if execErr != nil {
+            errString = execErr.Error()
+            log.Printf("Task %s step '%s' failed: %v", taskResp.TaskId, taskResp.StepName, execErr)
+        } else{
 			result = res
-			log.Printf("Task %s completed successfully", taskResp.TaskId)
+            log.Printf("Task %s step '%s' completed", taskResp.TaskId, taskResp.StepName)
 		}
 	}
 
-	// Complete the task
 	_, completeErr := client.CompleteTask(ctx, &pb.CompleteTaskRequest{
-		TaskId:   taskResp.TaskId,
-		WorkerId: w.workerID,
-		Result:   result,
-		Error:    errString,
-	})
+        TaskId:   taskResp.TaskId,
+        WorkerId: w.workerID,
+        Result:   result,
+        Error:    errString,
+    })
 
 	if completeErr != nil {
-		log.Printf("Failed to report completion for task %s: %v", taskResp.TaskId, completeErr)
-	}
+        log.Printf("Failed to report completion for task %s: %v", taskResp.TaskId, completeErr)
+    }
 }
