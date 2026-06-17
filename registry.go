@@ -7,6 +7,9 @@ import (
 
 // Registry contains the workflows this worker can execute.
 type Registry interface {
+	// Register registers a workflow definition with the registry.
+	Register(name string, wType WorkflowType, steps []workflowStep) error
+
 	// GetStep resolves a specific step function by workflow name and step name.
 	GetStep(workflowName, stepName string) (WorkflowFunc, error)
 
@@ -32,7 +35,7 @@ func NewRegistry() Registry {
 	}
 }
 
-func (r *registryImpl) register(name string, wType WorkflowType, steps []workflowStep) error {
+func (r *registryImpl) Register(name string, wType WorkflowType, steps []workflowStep) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

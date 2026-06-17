@@ -129,7 +129,7 @@ func (w *workerImpl) Start(ctx context.Context) error {
 				return fmt.Errorf("stream read error: %w", err)
 			}
 
-			w.processTask(ctx, grpcClient, taskResp)
+			go w.processTask(ctx, grpcClient, taskResp)
 		}
 	}
 }

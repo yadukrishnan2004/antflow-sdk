@@ -93,7 +93,7 @@ func (c *clientImpl) StartWorkflow(ctx context.Context, workflowName string, tas
 		return "", fmt.Errorf("failed to start workflow via grpc: %w", err)
 	}
 
-	return res.WorkflowId, nil
+	return res.Id, nil
 }
 
 func (c *clientImpl) Close() error {
@@ -148,10 +148,10 @@ func (c *clientImpl) WaitForResult(ctx context.Context, workflowExecutionID stri
 			break
 		}
 
-		if event.EventType == "WorkflowExecutionCompleted" {
+		if event.EventType == "WORKFLOW_COMPLETED" {
 			return event.Result, nil
 		}
-		if event.EventType == "WorkflowExecutionFailed" || event.EventType == "WorkflowExecutionCancelled" {
+		if event.EventType == "WORKFLOW_FAILED" || event.EventType == "WORKFLOW_CANCELLED" {
 			return nil, fmt.Errorf("workflow ended in non-successful state: %s", event.EventType)
 		}
 	}

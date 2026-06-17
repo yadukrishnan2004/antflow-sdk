@@ -1,8 +1,6 @@
 package sdk
 
-import (
-	"fmt"
-)
+
 
 // ChainWorkflowBuilder builds a CHAIN workflow.
 type ChainWorkflowBuilder struct {
@@ -25,10 +23,7 @@ func (b *ChainWorkflowBuilder) Step(name string, fn WorkflowFunc) *ChainWorkflow
 
 // Register registers the built CHAIN workflow with the provided local registry.
 func (b *ChainWorkflowBuilder) Register(r Registry) error {
-	if impl, ok := r.(*registryImpl); ok {
-		return impl.register(b.name, ChainWorkflow, b.steps)
-	}
-	return fmt.Errorf("unsupported registry implementation")
+	return r.Register(b.name, ChainWorkflow, b.steps)
 }
 
 // IndependentWorkflowBuilder builds an INDEPENDENT workflow.
@@ -52,8 +47,5 @@ func (b *IndependentWorkflowBuilder) Step(name string, fn WorkflowFunc) *Indepen
 
 // Register registers the built INDEPENDENT workflow with the provided local registry.
 func (b *IndependentWorkflowBuilder) Register(r Registry) error {
-	if impl, ok := r.(*registryImpl); ok {
-		return impl.register(b.name, IndependentWorkflow, b.steps)
-	}
-	return fmt.Errorf("unsupported registry implementation")
+	return r.Register(b.name, IndependentWorkflow, b.steps)
 }
