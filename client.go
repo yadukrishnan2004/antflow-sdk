@@ -9,6 +9,20 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+
+type clientOptions struct {
+	target string
+}
+
+type ClientOption func(*clientOptions)
+
+func WithTarget (target string) ClientOption {
+	return func (o *clientOptions)  {
+		o.target =target
+	}
+}
+
+
 // Client is the command interface for controlling workflows through AntFlow.
 //
 // Use a client when your application needs to register workflows with the
@@ -55,16 +69,22 @@ type clientImpl struct {
 // NewClient connects to an AntFlow server.
 //
 // target should be a gRPC address such as "localhost:50051".
-func NewClient(target string) (Client, error) {
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func NewClient(opts ...ClientOption) (Client, error) {
+	options := &clientOptions{
+		target: "localhost:50051",
+	}
+
+	for _, o :=range opts {
+		o(options)
+	}
+
+	conn, err := grpc.NewClient(options.target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to server: %w", err)
 	}
-
-	grpcClient := pb.NewWorkflowServiceClient(conn)
 	return &clientImpl{
 		conn:       conn,
-		grpcClient: grpcClient,
+		grpcClient:  pb.NewWorkflowServiceClient(conn),
 	}, nil
 }
 
