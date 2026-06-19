@@ -5,37 +5,18 @@ import (
 	"sync"
 )
 
-// Registry contains the workflows this worker can execute.
-type Registry interface {
-	// Register registers a workflow definition with the registry.
-	Register(name string, wType WorkflowType, steps []workflowStep) error
-
-	// GetStep resolves a specific step function by workflow name and step name.
-	GetStep(workflowName, stepName string) (WorkflowFunc, error)
-
-	// GetStepNames returns all step names defined for a workflow in registration order.
-	GetStepNames(workflowName string) ([]string, error)
-
-	// GetWorkflowType returns the registered pattern type of a workflow.
-	GetWorkflowType(workflowName string) (WorkflowType, error)
-
-	// GetRegisteredWorkflows retrieves a copy of all workflows currently registered.
-	GetRegisteredWorkflows() map[string]*registeredWorkflow
-}
-
-type registryImpl struct {
+type registry struct {
 	mu        sync.RWMutex
 	workflows map[string]*registeredWorkflow
 }
 
-// NewRegistry creates an empty local workflow registry.
-func NewRegistry() Registry {
-	return &registryImpl{
+func newRegistry() *registry {
+	return &registry{
 		workflows: make(map[string]*registeredWorkflow),
 	}
 }
 
-func (r *registryImpl) Register(name string, wType WorkflowType, steps []workflowStep) error {
+func (r *registry) register(name string, wType WorkflowType, steps []workflowStep) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -46,7 +27,7 @@ func (r *registryImpl) Register(name string, wType WorkflowType, steps []workflo
 	stepMap := make(map[string]WorkflowFunc)
 	for _, step := range steps {
 		if _, exists := stepMap[step.name]; exists {
-			return fmt.Errorf("step '%s' is registered multiple times in workflow '%s'", step.name, name)
+			return fmt.Errorf("duplicate step '%s' in workflow '%s'", step.name, name)
 		}
 		stepMap[step.name] = step.fn
 	}
@@ -59,7 +40,7 @@ func (r *registryImpl) Register(name string, wType WorkflowType, steps []workflo
 	return nil
 }
 
-func (r *registryImpl) GetStep(workflowName, stepName string) (WorkflowFunc, error) {
+func (r *registry) getStep(workflowName, stepName string) (WorkflowFunc, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -76,7 +57,7 @@ func (r *registryImpl) GetStep(workflowName, stepName string) (WorkflowFunc, err
 	return fn, nil
 }
 
-func (r *registryImpl) GetStepNames(workflowName string) ([]string, error) {
+func (r *registry) getStepNames(workflowName string) ([]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -92,7 +73,7 @@ func (r *registryImpl) GetStepNames(workflowName string) ([]string, error) {
 	return names, nil
 }
 
-func (r *registryImpl) GetWorkflowType(workflowName string) (WorkflowType, error) {
+func (r *registry) getWorkflowType(workflowName string) (WorkflowType, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -104,7 +85,7 @@ func (r *registryImpl) GetWorkflowType(workflowName string) (WorkflowType, error
 	return wf.workflowType, nil
 }
 
-func (r *registryImpl) GetRegisteredWorkflows() map[string]*registeredWorkflow {
+func (r *registry) getAll() map[string]*registeredWorkflow {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

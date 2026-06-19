@@ -4,166 +4,191 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
+	"strconv"
+	"sync"
 
 	"github.com/yadukrishnan2004/antflow-server/api/grpc/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+
+const defaultPoolSize = 0
+
 // Worker executes workflows from an AntFlow task queue.
-//
-// A worker connects to the AntFlow server, advertises the workflows available in
-// its Registry, listens for tasks on a task queue, and reports completed results
-// back to the server.
 type Worker interface {
-	// Start connects the worker to AntFlow and begins processing tasks.
-	//
-	// Start blocks until the context is cancelled or the worker encounters a
-	// stream error.
+	// Start connects to AntFlow, registers workflows, and begins processing tasks.
+	// Blocks until ctx is cancelled or a stream error occurs.
 	Start(ctx context.Context) error
 }
 
 type workerImpl struct {
-	target    string
+	app *App
 	taskQueue string
-	registry  Registry
-	workerID  string
+	workerID string
+	poolSize int
 }
 
-// WorkerOptions configures a worker process.
-type WorkerOptions struct {
-	// Target is the AntFlow server gRPC address, such as "localhost:50051".
-	Target string
+// WorkerOption configures optional worker behaviour.
+type WorkerOption func(*workerImpl)
 
-	// TaskQueue is the queue this worker will poll for workflow tasks.
-	//
-	// StartWorkflow must use the same task queue for this worker to receive the
-	// execution.
-	TaskQueue string
-
-	// Registry contains the workflows this worker can execute.
-	//
-	// Register workflows with NewRegistry before passing the registry to NewWorker.
-	Registry Registry
-
-	// WorkerID is an optional stable identifier for logs and server coordination.
-	//
-	// If empty, NewWorker uses "default-worker".
-	WorkerID string
+func WithPoolSize(n int) WorkerOption {
+	return func(w *workerImpl) {
+		w.poolSize = n
+	}
 }
 
-// NewWorker creates a worker for the provided task queue and registry.
-//
-// Example:
-//
-//	registry := sdk.NewRegistry()
-//	registry.RegisterWorkflow("add").AddStep("add", addWorkflow)
-//
-//	worker := sdk.NewWorker(sdk.WorkerOptions{
-//		Target:    "localhost:50051",
-//		TaskQueue: "calc-queue",
-//		Registry:  registry,
-//		WorkerID:  "calc-worker-1",
-//	})
-//
-//	err := worker.Start(ctx)
-func NewWorker(opts WorkerOptions) Worker {
-	if opts.WorkerID == "" {
-		opts.WorkerID = "default-worker"
+func newWorker(app *App, taskQueue string, opts ...WorkerOption) Worker {
+	w := &workerImpl{
+		app: app,
+		taskQueue: taskQueue,
+		workerID: generateWorkerID(),
+		poolSize: defaultPoolSize,
 	}
-	return &workerImpl{
-		target:    opts.Target,
-		taskQueue: opts.TaskQueue,
-		registry:  opts.Registry,
-		workerID:  opts.WorkerID,
+
+	for _, o := range opts {
+		o(w)
 	}
+	if w.poolSize <= 0 {
+		w.poolSize = runtime.NumCPU()
+	}
+
+	return w
+}
+
+func generateWorkerID() string {
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	pid := strconv.Itoa(os.Getpid())
+	return fmt.Sprintf("%s-%s", host, pid)
 }
 
 func (w *workerImpl) Start(ctx context.Context) error {
-	conn, err := grpc.NewClient(w.target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err := w.app.flushRegistrations(); err != nil {
+		return fmt.Errorf("worker [%s] failed to flush registrations: %w", w.workerID, err)
+	}
+
+	conn, err := grpc.NewClient(w.app.target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
+		return fmt.Errorf("worker [%s] failed to connect: %w", w.workerID, err)
 	}
 	defer conn.Close()
 
 	grpcClient := pb.NewWorkflowServiceClient(conn)
 
-	log.Printf("Worker [%s] connected to %s, listening on queue '%s'", w.workerID, w.target, w.taskQueue)
+	log.Printf("Worker [%s] connected to %s, queue='%s', pool=%d",
+		w.workerID, w.app.target, w.taskQueue, w.poolSize)
 
-	// Auto-register workflows with the server
-	for workflowName, def := range w.registry.GetRegisteredWorkflows() {
-		_ = def // satisfy compiler if def is unused
-		stepNames, _ := w.registry.GetStepNames(workflowName)
-		wfType, _ := w.registry.GetWorkflowType(workflowName)
-		_, err := grpcClient.RegisterWorkflow(ctx, &pb.RegisterWorkflowRequest{
-			Name:         workflowName,
-			WorkflowType: string(wfType),
-			Steps:        stepNames,
-		})
-		if err != nil {
-			log.Printf("Worker [%s] failed to register workflow '%s': %v", w.workerID, workflowName, err)
-		} else {
-			log.Printf("Worker [%s] successfully registered workflow '%s' with server", w.workerID, workflowName)
-		}
+	if err := w.registerWorkflows(ctx, grpcClient); err != nil {
+		return err
 	}
 
-	// Open the stream
 	stream, err := grpcClient.StreamTasks(ctx, &pb.StreamTasksRequest{
 		WorkerId:  w.workerID,
 		TaskQueue: w.taskQueue,
 	})
+
 	if err != nil {
-		return fmt.Errorf("failed to open task stream: %w", err)
+		return fmt.Errorf("worker [%s] failed to open task stream: %w", w.workerID, err)
 	}
 
+	taskCh := make(chan *pb.StreamTaskResponse, w.poolSize)
+	return w.runPool(ctx, grpcClient, stream, taskCh)
+}
+
+func (w *workerImpl) registerWorkflows(ctx context.Context, grpcClient pb.WorkflowServiceClient) error {
+	for name := range w.app.registry.getAll() {
+		stepNames, _ := w.app.registry.getStepNames(name)
+		wfType, _ := w.app.registry.getWorkflowType(name)
+
+		_, err := grpcClient.RegisterWorkflow(ctx, &pb.RegisterWorkflowRequest{
+			Name:         name,
+			WorkflowType: string(wfType),
+			Steps:        stepNames,
+		})
+		if err != nil {
+			log.Printf("Worker [%s] failed to register workflow '%s': %v", w.workerID, name, err)
+		} else {
+			log.Printf("Worker [%s] registered workflow '%s' (%s)", w.workerID, name, wfType)
+		}
+	}
+	return nil
+}
+
+func (w *workerImpl) runPool(
+	ctx context.Context,
+	grpcClient pb.WorkflowServiceClient,
+	stream pb.WorkflowService_StreamTasksClient,
+	taskCh chan *pb.StreamTaskResponse,
+) error {
+	var wg sync.WaitGroup
+
+	// Spawn fixed pool of workers
+	for i := range w.poolSize {
+		wg.Add(1)
+		go func(workerIndex int) {
+			defer wg.Done()
+			for task := range taskCh {
+				w.processTask(ctx, grpcClient, task)
+			}
+		}(i)
+	}
+
+	var streamErr error
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Worker context cancelled, stopping...")
+			log.Printf("Worker [%s] context cancelled, draining pool...", w.workerID)
+			close(taskCh)
+			wg.Wait()
 			return nil
 		default:
-			// Recv blocks until a task is available (or stream errors out)
-			taskResp, err := stream.Recv()
+			task, err := stream.Recv()
 			if err != nil {
-				// Stream closed or error, handle reconnection logic in a real system
-				return fmt.Errorf("stream read error: %w", err)
+				streamErr = fmt.Errorf("worker [%s] stream error: %w", w.workerID, err)
+				close(taskCh)
+				wg.Wait()
+				return streamErr
 			}
-
-			go w.processTask(ctx, grpcClient, taskResp)
+			taskCh <- task
 		}
 	}
 }
 
-func (w *workerImpl)  processTask(ctx context.Context, client pb.WorkflowServiceClient, taskResp *pb.StreamTaskResponse) {
-	log.Printf("Worker [%s] picked up task %s — workflow=%s step=%s index=%d", 
-	w.workerID, taskResp.TaskId, taskResp.WorkflowId, taskResp.StepName, taskResp.StepIndex)
+func (w *workerImpl) processTask(ctx context.Context, grpcClien pb.WorkflowServiceClient, task *pb.StreamTaskResponse) {
+	log.Printf("Worker [%s] processing task=%s workflow=%s step=%s",
+		w.workerID, task.TaskId, task.WorkflowId, task.StepName)
 
 	var result []byte
 	var errString string
 
-	stepFn, err := w.registry.GetStep(taskResp.Name,taskResp.StepName)
+	stepFn, err := w.app.registry.getStep(task.Name, task.StepName)
 	if err != nil {
-        errString = err.Error()
-        log.Printf("Task %s failed to find step: %v", taskResp.TaskId, err)
-    }else{
-        res, execErr := stepFn(ctx, taskResp.Input)
-		 if execErr != nil {
-            errString = execErr.Error()
-            log.Printf("Task %s step '%s' failed: %v", taskResp.TaskId, taskResp.StepName, execErr)
-        } else{
+		errString = err.Error()
+		log.Printf("Worker [%s] task=%s step not found: %v", w.workerID, task.TaskId, err)
+	} else {
+		res, execErr := stepFn(ctx, task.Input)
+		if execErr != nil {
+			errString = execErr.Error()
+			log.Printf("Worker [%s] task=%s step='%s' failed: %v", w.workerID, task.TaskId, task.StepName, execErr)
+		} else {
 			result = res
-            log.Printf("Task %s step '%s' completed", taskResp.TaskId, taskResp.StepName)
+			log.Printf("Worker [%s] task=%s step='%s' completed", w.workerID, task.TaskId, task.StepName)
 		}
 	}
 
-	_, completeErr := client.CompleteTask(ctx, &pb.CompleteTaskRequest{
-        TaskId:   taskResp.TaskId,
-        WorkerId: w.workerID,
-        Result:   result,
-        Error:    errString,
-    })
+	_, completeErr := w.app.grpcClient.CompleteTask(ctx, &pb.CompleteTaskRequest{
+		TaskId:   task.TaskId,
+		WorkerId: w.workerID,
+		Result:   result,
+		Error:    errString,
+	})
 
 	if completeErr != nil {
-        log.Printf("Failed to report completion for task %s: %v", taskResp.TaskId, completeErr)
-    }
-}
+		log.Printf("Worker [%s] failed to report task=%s completion: %v", w.workerID, task.TaskId, completeErr)
+	}
+}	

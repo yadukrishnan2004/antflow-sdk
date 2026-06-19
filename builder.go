@@ -1,51 +1,49 @@
 package sdk
 
+import "fmt"
 
-
-// ChainWorkflowBuilder builds a CHAIN workflow.
-type ChainWorkflowBuilder struct {
-	name  string
-	steps []workflowStep
+type WorkflowBuilder struct{
+	name string
+	app  *App
 }
 
-// NewChainWorkflow creates a builder for a sequential (chained) workflow.
-func NewChainWorkflow(name string) *ChainWorkflowBuilder {
-	return &ChainWorkflowBuilder{
-		name: name,
+type StepBuilder struct {
+	name     string
+	wType    WorkflowType
+	steps    []workflowStep
+	app       *App
+}
+
+func (b *WorkflowBuilder) Chain() *StepBuilder {
+	return &StepBuilder{
+		name: b.name,
+		wType: ChainWorkflow,
+		app :b.app,
 	}
 }
 
-// Step appends a sequential step to the chain.
-func (b *ChainWorkflowBuilder) Step(name string, fn WorkflowFunc) *ChainWorkflowBuilder {
-	b.steps = append(b.steps, workflowStep{name: name, fn: fn})
-	return b
-}
 
-// Register registers the built CHAIN workflow with the provided local registry.
-func (b *ChainWorkflowBuilder) Register(r Registry) error {
-	return r.Register(b.name, ChainWorkflow, b.steps)
-}
-
-// IndependentWorkflowBuilder builds an INDEPENDENT workflow.
-type IndependentWorkflowBuilder struct {
-	name  string
-	steps []workflowStep
-}
-
-// NewIndependentWorkflow creates a builder for a concurrent (independent) workflow.
-func NewIndependentWorkflow(name string) *IndependentWorkflowBuilder {
-	return &IndependentWorkflowBuilder{
-		name: name,
+func (b *WorkflowBuilder) Independent() *StepBuilder {
+	return &StepBuilder{
+		name: b.name,
+		wType: IndependentWorkflow,
+		app: b.app,
 	}
 }
 
-// Step adds a standalone step to the execution list.
-func (b *IndependentWorkflowBuilder) Step(name string, fn WorkflowFunc) *IndependentWorkflowBuilder {
-	b.steps = append(b.steps, workflowStep{name: name, fn: fn})
+
+func (b *StepBuilder) Step(name string, fn WorkflowFunc) *StepBuilder {
+	b.steps = append(b.steps, workflowStep{name:name ,fn: fn})
 	return b
 }
 
-// Register registers the built INDEPENDENT workflow with the provided local registry.
-func (b *IndependentWorkflowBuilder) Register(r Registry) error {
-	return r.Register(b.name, IndependentWorkflow, b.steps)
+func (b *StepBuilder) Done() {
+	b.app.track(b)
+}
+
+func (b *StepBuilder) register() error {
+	if len(b.steps) == 0 {
+		return fmt.Errorf("workflow '%s' has no steps", b.name)
+	}
+	return b.app.registry.register(b.name, b.wType, b.steps)
 }
