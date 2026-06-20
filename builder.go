@@ -31,9 +31,26 @@ func (b *WorkflowBuilder) Independent() *StepBuilder {
 	}
 }
 
+func (b *WorkflowBuilder) Saga() *StepBuilder {
+	return &StepBuilder{
+		name: b.name,
+		wType: SagaWorkflow,
+		app: b.app,
+	}
+}
 
 func (b *StepBuilder) Step(name string, fn WorkflowFunc) *StepBuilder {
-	b.steps = append(b.steps, workflowStep{name:name ,fn: fn})
+	b.steps = append(b.steps, workflowStep{name: name, fn: fn})
+	return b
+}
+
+func (b *StepBuilder) SagaStep(name string, fn WorkflowFunc, compensationName string, compensationFn WorkflowFunc) *StepBuilder {
+	b.steps = append(b.steps, workflowStep{
+		name:             name,
+		fn:               fn,
+		compensationName: compensationName,
+		compensationFn:   compensationFn,
+	})
 	return b
 }
 

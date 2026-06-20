@@ -25,17 +25,25 @@ func (r *registry) register(name string, wType WorkflowType, steps []workflowSte
 	}
 
 	stepMap := make(map[string]WorkflowFunc)
+	compensationMap := make(map[string]WorkflowFunc)
 	for _, step := range steps {
 		if _, exists := stepMap[step.name]; exists {
 			return fmt.Errorf("duplicate step '%s' in workflow '%s'", step.name, name)
 		}
 		stepMap[step.name] = step.fn
+		if step.compensationName != "" && step.compensationFn != nil {
+			if _, exists := compensationMap[step.compensationName]; exists {
+				return fmt.Errorf("duplicate compensation step '%s' in workflow '%s'", step.compensationName, name)
+			}
+			compensationMap[step.compensationName] = step.compensationFn
+		}
 	}
 
 	r.workflows[name] = &registeredWorkflow{
-		workflowType: wType,
-		steps:        steps,
-		stepMap:      stepMap,
+		workflowType:    wType,
+		steps:           steps,
+		stepMap:         stepMap,
+		compensationMap: compensationMap,
 	}
 	return nil
 }
@@ -57,6 +65,23 @@ func (r *registry) getStep(workflowName, stepName string) (WorkflowFunc, error) 
 	return fn, nil
 }
 
+func (r *registry) getCompensationStep(workflowName, stepName string) (WorkflowFunc, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	wf, ok := r.workflows[workflowName]
+	if !ok {
+		return nil, fmt.Errorf("workflow '%s' not found in registry", workflowName)
+	}
+
+	fn, ok := wf.compensationMap[stepName]
+	if !ok {
+		return nil, fmt.Errorf("compensation step '%s' not found in workflow '%s'", stepName, workflowName)
+	}
+
+	return fn, nil
+}
+
 func (r *registry) getStepNames(workflowName string) ([]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -69,6 +94,22 @@ func (r *registry) getStepNames(workflowName string) ([]string, error) {
 	names := make([]string, len(wf.steps))
 	for i, step := range wf.steps {
 		names[i] = step.name
+	}
+	return names, nil
+}
+
+func (r *registry) getCompensationStepNames(workflowName string) ([]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	wf, ok := r.workflows[workflowName]
+	if !ok {
+		return nil, fmt.Errorf("workflow '%s' not found in registry", workflowName)
+	}
+
+	names := make([]string, len(wf.steps))
+	for i, step := range wf.steps {
+		names[i] = step.compensationName
 	}
 	return names, nil
 }

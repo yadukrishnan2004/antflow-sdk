@@ -91,24 +91,34 @@ func (w *workerImpl) Start(ctx context.Context) error {
 		WorkerId:  w.workerID,
 		TaskQueue: w.taskQueue,
 	})
-
 	if err != nil {
 		return fmt.Errorf("worker [%s] failed to open task stream: %w", w.workerID, err)
 	}
 
+	compStream, err := grpcClient.StreamCompensationTasks(ctx, &pb.StreamTasksRequest{
+		WorkerId:  w.workerID,
+		TaskQueue: w.taskQueue,
+	})
+	if err != nil {
+		return fmt.Errorf("worker [%s] failed to open compensation stream: %w", w.workerID, err)
+	}
+
 	taskCh := make(chan *pb.StreamTaskResponse, w.poolSize)
-	return w.runPool(ctx, grpcClient, stream, taskCh)
+	compTaskCh := make(chan *pb.CompensationTaskResponse, w.poolSize)
+	return w.runPool(ctx, grpcClient, stream, compStream, taskCh, compTaskCh)
 }
 
 func (w *workerImpl) registerWorkflows(ctx context.Context, grpcClient pb.WorkflowServiceClient) error {
 	for name := range w.app.registry.getAll() {
 		stepNames, _ := w.app.registry.getStepNames(name)
+		compensationStepNames, _ := w.app.registry.getCompensationStepNames(name)
 		wfType, _ := w.app.registry.getWorkflowType(name)
 
 		_, err := grpcClient.RegisterWorkflow(ctx, &pb.RegisterWorkflowRequest{
-			Name:         name,
-			WorkflowType: string(wfType),
-			Steps:        stepNames,
+			Name:              name,
+			WorkflowType:      string(wfType),
+			Steps:             stepNames,
+			CompensationSteps: compensationStepNames,
 		})
 		if err != nil {
 			log.Printf("Worker [%s] failed to register workflow '%s': %v", w.workerID, name, err)
@@ -123,7 +133,9 @@ func (w *workerImpl) runPool(
 	ctx context.Context,
 	grpcClient pb.WorkflowServiceClient,
 	stream pb.WorkflowService_StreamTasksClient,
+	compStream pb.WorkflowService_StreamCompensationTasksClient,
 	taskCh chan *pb.StreamTaskResponse,
+	compTaskCh chan *pb.CompensationTaskResponse,
 ) error {
 	var wg sync.WaitGroup
 
@@ -132,34 +144,77 @@ func (w *workerImpl) runPool(
 		wg.Add(1)
 		go func(workerIndex int) {
 			defer wg.Done()
-			for task := range taskCh {
-				w.processTask(ctx, grpcClient, task)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok := <-taskCh:
+					if !ok {
+						return
+					}
+					w.processTask(ctx, grpcClient, task)
+				case compTask, ok := <-compTaskCh:
+					if !ok {
+						return
+					}
+					w.processCompensationTask(ctx, grpcClient, compTask)
+				}
 			}
 		}(i)
 	}
 
 	var streamErr error
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("Worker [%s] context cancelled, draining pool...", w.workerID)
+	var once sync.Once
+	closeChs := func() {
+		once.Do(func() {
 			close(taskCh)
-			wg.Wait()
-			return nil
-		default:
+			close(compTaskCh)
+		})
+	}
+
+	// Reader for forward tasks
+	go func() {
+		for {
 			task, err := stream.Recv()
 			if err != nil {
 				streamErr = fmt.Errorf("worker [%s] stream error: %w", w.workerID, err)
-				close(taskCh)
-				wg.Wait()
-				return streamErr
+				closeChs()
+				return
 			}
-			taskCh <- task
+			select {
+			case <-ctx.Done():
+				return
+			case taskCh <- task:
+			}
 		}
-	}
+	}()
+
+	// Reader for compensation tasks
+	go func() {
+		for {
+			compTask, err := compStream.Recv()
+			if err != nil {
+				if streamErr == nil {
+					streamErr = fmt.Errorf("worker [%s] compensation stream error: %w", w.workerID, err)
+				}
+				closeChs()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case compTaskCh <- compTask:
+			}
+		}
+	}()
+
+	<-ctx.Done()
+	closeChs()
+	wg.Wait()
+	return streamErr
 }
 
-func (w *workerImpl) processTask(ctx context.Context, grpcClien pb.WorkflowServiceClient, task *pb.StreamTaskResponse) {
+func (w *workerImpl) processTask(ctx context.Context, grpcClient pb.WorkflowServiceClient, task *pb.StreamTaskResponse) {
 	log.Printf("Worker [%s] processing task=%s workflow=%s step=%s",
 		w.workerID, task.TaskId, task.WorkflowId, task.StepName)
 
@@ -181,7 +236,7 @@ func (w *workerImpl) processTask(ctx context.Context, grpcClien pb.WorkflowServi
 		}
 	}
 
-	_, completeErr := w.app.grpcClient.CompleteTask(ctx, &pb.CompleteTaskRequest{
+	_, completeErr := grpcClient.CompleteTask(ctx, &pb.CompleteTaskRequest{
 		TaskId:   task.TaskId,
 		WorkerId: w.workerID,
 		Result:   result,
@@ -191,4 +246,38 @@ func (w *workerImpl) processTask(ctx context.Context, grpcClien pb.WorkflowServi
 	if completeErr != nil {
 		log.Printf("Worker [%s] failed to report task=%s completion: %v", w.workerID, task.TaskId, completeErr)
 	}
-}	
+}
+
+func (w *workerImpl) processCompensationTask(ctx context.Context, grpcClient pb.WorkflowServiceClient, task *pb.CompensationTaskResponse) {
+	log.Printf("Worker [%s] processing compensation task=%s workflow=%s step=%s compensation_step=%s",
+		w.workerID, task.TaskId, task.WorkflowId, task.StepName, task.CompensationStepName)
+
+	var result []byte
+	var errString string
+
+	stepFn, err := w.app.registry.getCompensationStep(task.Name, task.CompensationStepName)
+	if err != nil {
+		errString = err.Error()
+		log.Printf("Worker [%s] compensation task=%s step not found: %v", w.workerID, task.TaskId, err)
+	} else {
+		res, execErr := stepFn(ctx, task.Input)
+		if execErr != nil {
+			errString = execErr.Error()
+			log.Printf("Worker [%s] compensation task=%s step='%s' failed: %v", w.workerID, task.TaskId, task.CompensationStepName, execErr)
+		} else {
+			result = res
+			log.Printf("Worker [%s] compensation task=%s step='%s' completed", w.workerID, task.TaskId, task.CompensationStepName)
+		}
+	}
+
+	_, completeErr := grpcClient.CompleteCompensationTask(ctx, &pb.CompleteCompensationTaskRequest{
+		TaskId:   task.TaskId,
+		WorkerId: w.workerID,
+		Result:   result,
+		Error:    errString,
+	})
+
+	if completeErr != nil {
+		log.Printf("Worker [%s] failed to report compensation task=%s completion: %v", w.workerID, task.TaskId, completeErr)
+	}
+}
