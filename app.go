@@ -142,6 +142,19 @@ func (a *App) getResult(ctx context.Context, workflowExecutionID string) ([]byte
 	return res.Result, nil
 }
 
+func (a *App) GetWorkflowResult(ctx context.Context, workflowExecutionID string) (string, []byte, error) {
+	res, err := a.grpcClient.GetWorkflowResult(ctx, &pb.GetWorkflowResultRequest{
+		WorkflowId: workflowExecutionID,
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get workflow result: %w", err)
+	}
+	if res.Error != "" {
+		return res.State, nil, fmt.Errorf("workflow failed: %s", res.Error)
+	}
+	return res.State, res.Result, nil
+}
+
 func (a *App) Close() error {
 	return a.conn.Close()
 }
