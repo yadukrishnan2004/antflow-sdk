@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/yadukrishnan2004/antflow-server/api/grpc/pb"
 	"google.golang.org/grpc"
@@ -103,7 +104,10 @@ func (a *App) WaitForResult(ctx context.Context,workflowExecutionID string) ([]b
 	for {
 		event, err := stream.Recv()
 		if err != nil {
-			break
+			if err == io.EOF {
+            break
+        }
+        return nil, fmt.Errorf("history stream error: %w", err)
 		}
 
 		switch event.EventType {
