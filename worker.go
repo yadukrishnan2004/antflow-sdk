@@ -173,6 +173,8 @@ func (w *workerImpl) runPool(
 		})
 	}
 
+	errCh := make(chan struct{}, 1)
+
 	// Reader for forward tasks
 	go func() {
 		for {
@@ -180,6 +182,10 @@ func (w *workerImpl) runPool(
 			if err != nil {
 				streamErr = fmt.Errorf("worker [%s] stream error: %w", w.workerID, err)
 				closeChs()
+				select {
+				case errCh <- struct{}{}:
+				default:
+				}
 				return
 			}
 			select {
@@ -199,6 +205,10 @@ func (w *workerImpl) runPool(
 					streamErr = fmt.Errorf("worker [%s] compensation stream error: %w", w.workerID, err)
 				}
 				closeChs()
+				select {
+				case errCh <- struct{}{}:
+				default:
+				}
 				return
 			}
 			select {
@@ -209,7 +219,10 @@ func (w *workerImpl) runPool(
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-errCh:
+	}
 	closeChs()
 	wg.Wait()
 	return streamErr
