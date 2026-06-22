@@ -14,7 +14,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-
 const defaultPoolSize = 0
 
 // Worker executes workflows from an AntFlow task queue.
@@ -25,10 +24,10 @@ type Worker interface {
 }
 
 type workerImpl struct {
-	app *App
+	app       *App
 	taskQueue string
-	workerID string
-	poolSize int
+	workerID  string
+	poolSize  int
 }
 
 // WorkerOption configures optional worker behaviour.
@@ -42,10 +41,10 @@ func WithPoolSize(n int) WorkerOption {
 
 func newWorker(app *App, taskQueue string, opts ...WorkerOption) Worker {
 	w := &workerImpl{
-		app: app,
+		app:       app,
 		taskQueue: taskQueue,
-		workerID: generateWorkerID(),
-		poolSize: defaultPoolSize,
+		workerID:  generateWorkerID(),
+		poolSize:  defaultPoolSize,
 	}
 
 	for _, o := range opts {
@@ -68,6 +67,9 @@ func generateWorkerID() string {
 }
 
 func (w *workerImpl) Start(ctx context.Context) error {
+	// flushRegistrations sends any pending workflow definitions to the server.
+	// Note: builder.Done() also calls register() locally (for the in-process
+	// registry), so flushRegistrations only needs to do the gRPC registration.
 	if err := w.app.flushRegistrations(); err != nil {
 		return fmt.Errorf("worker [%s] failed to flush registrations: %w", w.workerID, err)
 	}
@@ -139,7 +141,6 @@ func (w *workerImpl) runPool(
 ) error {
 	var wg sync.WaitGroup
 
-	// Spawn fixed pool of workers
 	for i := range w.poolSize {
 		wg.Add(1)
 		go func(workerIndex int) {
@@ -214,6 +215,13 @@ func (w *workerImpl) runPool(
 	return streamErr
 }
 
+// processTask executes a single forward step.
+//
+// The step function receives an ActivityContext (wrapped inside a
+// context.Context) so that it can call WaitForSignal if it needs to pause
+// until an external event arrives. The grpcClient passed here is the worker's
+// live connection — the ActivityContext uses it to issue PollSignal RPCs
+// without requiring the step function to know about gRPC.
 func (w *workerImpl) processTask(ctx context.Context, grpcClient pb.WorkflowServiceClient, task *pb.StreamTaskResponse) {
 	log.Printf("Worker [%s] processing task=%s workflow=%s step=%s",
 		w.workerID, task.TaskId, task.WorkflowId, task.StepName)
@@ -226,7 +234,15 @@ func (w *workerImpl) processTask(ctx context.Context, grpcClient pb.WorkflowServ
 		errString = err.Error()
 		log.Printf("Worker [%s] task=%s step not found: %v", w.workerID, task.TaskId, err)
 	} else {
-		res, execErr := stepFn(ctx, task.Input)
+		// Build an ActivityContext so the step can call WaitForSignal.
+		ac := &ActivityContext{
+			Context:     ctx,
+			ExecutionID: task.WorkflowId,
+			grpcClient:  grpcClient,
+		}
+		stepCtx := WithActivityContext(ctx, ac)
+
+		res, execErr := stepFn(stepCtx, task.Input)
 		if execErr != nil {
 			errString = execErr.Error()
 			log.Printf("Worker [%s] task=%s step='%s' failed: %v", w.workerID, task.TaskId, task.StepName, execErr)
@@ -242,12 +258,14 @@ func (w *workerImpl) processTask(ctx context.Context, grpcClient pb.WorkflowServ
 		Result:   result,
 		Error:    errString,
 	})
-
 	if completeErr != nil {
 		log.Printf("Worker [%s] failed to report task=%s completion: %v", w.workerID, task.TaskId, completeErr)
 	}
 }
 
+// processCompensationTask executes a single saga rollback step.
+// Compensation steps also receive an ActivityContext in case they need to
+// wait for an approval signal before completing the rollback.
 func (w *workerImpl) processCompensationTask(ctx context.Context, grpcClient pb.WorkflowServiceClient, task *pb.CompensationTaskResponse) {
 	log.Printf("Worker [%s] processing compensation task=%s workflow=%s step=%s compensation_step=%s",
 		w.workerID, task.TaskId, task.WorkflowId, task.StepName, task.CompensationStepName)
@@ -260,7 +278,14 @@ func (w *workerImpl) processCompensationTask(ctx context.Context, grpcClient pb.
 		errString = err.Error()
 		log.Printf("Worker [%s] compensation task=%s step not found: %v", w.workerID, task.TaskId, err)
 	} else {
-		res, execErr := stepFn(ctx, task.Input)
+		ac := &ActivityContext{
+			Context:     ctx,
+			ExecutionID: task.WorkflowId,
+			grpcClient:  grpcClient,
+		}
+		stepCtx := WithActivityContext(ctx, ac)
+
+		res, execErr := stepFn(stepCtx, task.Input)
 		if execErr != nil {
 			errString = execErr.Error()
 			log.Printf("Worker [%s] compensation task=%s step='%s' failed: %v", w.workerID, task.TaskId, task.CompensationStepName, execErr)
@@ -276,7 +301,6 @@ func (w *workerImpl) processCompensationTask(ctx context.Context, grpcClient pb.
 		Result:   result,
 		Error:    errString,
 	})
-
 	if completeErr != nil {
 		log.Printf("Worker [%s] failed to report compensation task=%s completion: %v", w.workerID, task.TaskId, completeErr)
 	}

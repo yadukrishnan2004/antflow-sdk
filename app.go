@@ -50,10 +50,9 @@ func NewApp(opts ...AppOption) (*App, error) {
 func (a *App) Workflow(name string) *WorkflowBuilder {
 	return &WorkflowBuilder{
 		name: name,
-		app: a,
+		app:  a,
 	}
 }
-
 
 func (a *App) NewWorker(taskQueue string, opts ...WorkerOption) Worker {
 	return newWorker(a, taskQueue, opts...)
@@ -64,11 +63,11 @@ func (a *App) StartWorkflow(
 	workflowName string,
 	taskQueue string,
 	input []byte,
-)(string, error) {
+) (string, error) {
 	res, err := a.grpcClient.StartWorkflow(ctx, &pb.StartWorkflowRequest{
 		WorkflowId: workflowName,
-		Input: input,
-		TaskQueue: taskQueue,
+		Input:      input,
+		TaskQueue:  taskQueue,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to start workflow '%s': %w", workflowName, err)
@@ -76,6 +75,26 @@ func (a *App) StartWorkflow(
 	return res.Id, nil
 }
 
+// SendSignal delivers a named signal payload to a running workflow execution.
+//
+// executionID is the string returned by StartWorkflow.
+// name identifies the signal (e.g. "payment-confirmed").
+// payload is an arbitrary byte blob the waiting step will receive.
+//
+// The call is fire-and-forget from the caller's perspective: if the step is
+// already blocked in WaitForSignal it is woken immediately; otherwise the
+// payload is buffered on the server until the step calls WaitForSignal.
+func (a *App) SendSignal(ctx context.Context, executionID, name string, payload []byte) error {
+	_, err := a.grpcClient.SendSignal(ctx, &pb.SendSignalRequest{
+		ExecutionId: executionID,
+		Name:        name,
+		Payload:     payload,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to send signal '%s' to execution '%s': %w", name, executionID, err)
+	}
+	return nil
+}
 
 func (a *App) track(sb *StepBuilder) {
 	a.pending = append(a.pending, sb)
@@ -91,23 +110,21 @@ func (a *App) flushRegistrations() error {
 	return nil
 }
 
-
-func (a *App) WaitForResult(ctx context.Context,workflowExecutionID string) ([]byte, error) {
+func (a *App) WaitForResult(ctx context.Context, workflowExecutionID string) ([]byte, error) {
 	stream, err := a.grpcClient.StreamWorkflowHistory(ctx, &pb.StreamWorkflowHistoryRequest{
 		WorkflowId: workflowExecutionID,
 	})
-
 	if err != nil {
-		return nil , fmt.Errorf("failed to stream workflow history: %w", err)
+		return nil, fmt.Errorf("failed to stream workflow history: %w", err)
 	}
 
 	for {
 		event, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
-            break
-        }
-        return nil, fmt.Errorf("history stream error: %w", err)
+				break
+			}
+			return nil, fmt.Errorf("history stream error: %w", err)
 		}
 
 		switch event.EventType {

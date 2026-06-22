@@ -55,9 +55,6 @@ func (b *StepBuilder) SagaStep(name string, fn WorkflowFunc, compensationName st
 }
 
 func (b *StepBuilder) Done() {
-	if err := b.register(); err != nil {
-        panic(fmt.Sprintf("antflow: invalid workflow '%s': %v", b.name, err))
-    }
     b.app.track(b)
 }
 
